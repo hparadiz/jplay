@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The Leanback launcher hides any app that declares no banner, and it never falls back
+  to the launcher icon, so the home-row tile is the app icon's own artwork composed onto
+  the brand background at 16:9. No separate art: the mark is @drawable/ic_launcher_foreground.
+-->
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+    <item android:drawable="@color/brand_background" />
+    <item android:drawable="@drawable/ic_launcher_foreground" android:gravity="center" android:width="90dp" android:height="90dp" />
+</layer-list>

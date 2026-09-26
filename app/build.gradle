@@ -1,0 +1,30 @@
+plugins { id 'com.android.application' }
+// Local settings live in ../.env (see .env.example); the environment wins over the file.
+def localEnv = [:]
+def envFile = rootProject.file('.env')
+if (envFile.exists()) envFile.eachLine { line ->
+    def m = line =~ /^([A-Z_][A-Z0-9_]*)=(.*)$/
+    if (m) localEnv[m[0][1]] = m[0][2].replaceAll(/^["']|["']$/, '')
+}
+def setting = { String key -> System.getenv(key) ?: localEnv[key] ?: '' }
+android {
+    namespace 'in.akuj.jplay'
+    compileSdk 34
+    defaultConfig {
+        applicationId 'in.akuj.jplay'
+        minSdk 26
+        targetSdk 34
+        versionCode 11
+        versionName '1.5.1'
+        resValue 'string', 'default_controller', setting('JPLAY_CONTROLLER')
+    }
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_1_8
+        targetCompatibility JavaVersion.VERSION_1_8
+    }
+}
+dependencies {
+    implementation 'org.videolan.android:libvlc-all:3.7.6'
+    implementation 'com.hierynomus:smbj:0.14.0'
+    runtimeOnly 'org.slf4j:slf4j-nop:2.0.9'
+}

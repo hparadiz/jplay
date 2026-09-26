@@ -1,0 +1,6 @@
+com/hierynomus/smbj/0.14.0/smbj-0.14.0.jar
+org/slf4j/slf4j-api/2.0.9/slf4j-api-2.0.9.jar
+org/slf4j/slf4j-nop/2.0.9/slf4j-nop-2.0.9.jar
+org/bouncycastle/bcprov-jdk18on/1.79/bcprov-jdk18on-1.79.jar
+net/engio/mbassador/1.3.0/mbassador-1.3.0.jar
+com/hierynomus/asn-one/0.6.0/asn-one-0.6.0.jar

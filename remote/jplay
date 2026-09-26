@@ -1,0 +1,226 @@
+#!/usr/bin/env php
+<?php
+declare(strict_types=1);
+
+/*
+ * jplay: tell Just Play what to play.
+ *
+ *   jplay <youtube link | url | smb:// uri | file>   play it on the TV
+ *   jplay status | pause | resume | toggle | stop
+ *   jplay serve                                       start the YouTube streamer and its token server
+ *
+ *   --host <ip>    the device to send to (default: JPLAY_TARGET)
+ *   --start <s>    start this many seconds in
+ *
+ * Settings come from the environment, then from the project's .env (see .env.example):
+ * JPLAY_TARGET, the device running Just Play, and JPLAY_BGUTIL, the bgutil-ytdlp-pot-provider
+ * server script YouTube playback needs.
+ *
+ * Links and smb:// URIs go straight to the app's API. A file on the NAS mount is sent as the
+ * smb:// URI the app streams natively; any other local file is served from here by serve.php,
+ * one unguessable token per file, to that one device.
+ */
+
+const API_PORT = 8791;
+const FILE_PORT = 8792;
+const HERE = __DIR__;
+
+function fail(string $message): never
+{
+    fwrite(STDERR, 'jplay: ' . $message . "\n");
+    exit(1);
+}
+
+/** Reads the project's .env once; anything already in the environment wins. */
+function setting(string $key): string
+{
+    static $file = null;
+    if ($file === null) {
+        $file = [];
+        foreach (@file(dirname(HERE) . '/.env', FILE_IGNORE_NEW_LINES) ?: [] as $line) {
+            if (preg_match('/^([A-Z_][A-Z0-9_]*)=(.*)$/', trim($line), $m)) {
+                $file[$m[1]] = trim($m[2], "\"'");
+            }
+        }
+    }
+    $value = getenv($key);
+    return trim($value !== false && $value !== '' ? $value : ($file[$key] ?? ''));
+}
+
+function stateDir(): string
+{
+    $dir = (getenv('XDG_STATE_HOME') ?: getenv('HOME') . '/.local/state') . '/jplay-remote';
+    if (!is_dir($dir)) {
+        mkdir($dir, 0700, true);
+    }
+    return $dir;
+}
+
+function listening(string $address, int $port): bool
+{
+    $socket = @fsockopen($address, $port, $errno, $errstr, 1.0);
+    if ($socket) {
+        fclose($socket);
+        return true;
+    }
+    return false;
+}
+
+function spawn(string $command, string $log, string $address, int $port): void
+{
+    if (listening($address, $port)) {
+        return;
+    }
+    exec('setsid -f ' . $command . ' >>' . escapeshellarg(stateDir() . '/' . $log) . ' 2>&1 </dev/null');
+    for ($i = 0; $i < 40 && !listening($address, $port); $i++) {
+        usleep(250000);
+    }
+    if (!listening($address, $port)) {
+        fail('could not start ' . $log . '; see ' . stateDir() . '/' . $log);
+    }
+}
+
+/** The token server first: the streamer asks it for a proof-of-origin token on every link. */
+function serve(): void
+{
+    $bgutil = setting('JPLAY_BGUTIL');
+    if ($bgutil === '' || !is_file($bgutil)) {
+        fail('set JPLAY_BGUTIL in .env to bgutil-ytdlp-pot-provider\'s server/build/main.js');
+    }
+    spawn('node ' . escapeshellarg($bgutil), 'bgutil.log', '127.0.0.1', 4416);
+    $allow = setting('JPLAY_STREAM_ALLOW');
+    spawn(($allow !== '' ? 'env JPLAY_STREAM_ALLOW=' . escapeshellarg($allow) . ' ' : '') . 'python3 ' . escapeshellarg(HERE . '/ytstream.py'),
+        'ytstream.log', '127.0.0.1', 8793);
+}
+
+function api(string $host, string $path, array $form = []): array
+{
+    $context = stream_context_create(['http' => [
+        'method' => $form ? 'POST' : 'GET',
+        'header' => "Content-Type: application/x-www-form-urlencoded\r\n",
+        'content' => http_build_query($form),
+        'timeout' => 120,
+        'ignore_errors' => true,
+    ]]);
+    $body = @file_get_contents('http://' . $host . ':' . API_PORT . $path, false, $context);
+    if ($body === false) {
+        fail('Just Play is not answering on ' . $host . ':' . API_PORT . ' - is the app installed and this machine its controller?');
+    }
+    return json_decode($body, true) ?: ['error' => trim($body)];
+}
+
+/** The SMB shares mounted here, as mountpoint => [host, share]. */
+function smbMounts(): array
+{
+    $mounts = [];
+    foreach (file('/proc/mounts', FILE_IGNORE_NEW_LINES) ?: [] as $line) {
+        $f = explode(' ', $line);
+        if (count($f) < 3 || !in_array($f[2], ['cifs', 'smb3'], true)) {
+            continue;
+        }
+        $decode = fn(string $v) => preg_replace_callback('/\\\\([0-7]{3})/', fn($m) => chr(octdec($m[1])), $v);
+        if (preg_match('#^//([^/]+)/([^/]+)#', $decode($f[0]), $m)) {
+            $mounts[rtrim($decode($f[1]), '/')] = [$m[1], $m[2]];
+        }
+    }
+    return $mounts;
+}
+
+/** Percent-encodes a path segment the way VLC writes the MRLs Just Play catalogues. */
+function mrlSegment(string $segment): string
+{
+    return strtr(rawurlencode($segment), [
+        '%21' => '!', '%24' => '$', '%26' => '&', '%27' => "'", '%28' => '(', '%29' => ')',
+        '%2A' => '*', '%2B' => '+', '%2C' => ',', '%3B' => ';', '%3D' => '=', '%3A' => ':', '%40' => '@',
+    ]);
+}
+
+function nasUri(string $path): ?string
+{
+    foreach (smbMounts() as $mountpoint => [$host, $share]) {
+        if (str_starts_with($path, $mountpoint . '/')) {
+            $segments = array_map('mrlSegment', explode('/', substr($path, strlen($mountpoint) + 1)));
+            return 'smb://' . $host . '/' . $share . '/' . implode('/', $segments);
+        }
+    }
+    return null;
+}
+
+/** Registers one file for one device with serve.php and returns the URL it can fetch. */
+function share(string $path, string $device): string
+{
+    exec('ip route get ' . escapeshellarg($device), $route);
+    if (!preg_match('/\bsrc (\d+\.\d+\.\d+\.\d+)/', implode(' ', $route), $m)) {
+        fail('no local route to ' . $device);
+    }
+    $address = $m[1];
+    spawn('env JPLAY_REMOTE_STATE=' . escapeshellarg(stateDir()) . ' PHP_CLI_SERVER_WORKERS=4 php -S ' . escapeshellarg($address . ':' . FILE_PORT)
+        . ' ' . escapeshellarg(HERE . '/serve.php'), 'serve.log', $address, FILE_PORT);
+    $state = stateDir() . '/files.json';
+    $handle = fopen($state, 'c+');
+    flock($handle, LOCK_EX);
+    $files = json_decode((string)stream_get_contents($handle), true) ?: [];
+    $files = array_filter($files, fn($entry) => ($entry['created'] ?? 0) > time() - 86400);
+    $token = bin2hex(random_bytes(16));
+    $files[$token] = ['path' => $path, 'allow' => [$device], 'created' => time()];
+    ftruncate($handle, 0);
+    rewind($handle);
+    fwrite($handle, json_encode($files, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES));
+    flock($handle, LOCK_UN);
+    fclose($handle);
+    chmod($state, 0600);
+    return 'http://' . $address . ':' . FILE_PORT . '/' . $token . '/' . rawurlencode(basename($path));
+}
+
+$args = array_slice($argv, 1);
+$host = setting('JPLAY_TARGET');
+$start = null;
+$words = [];
+for ($i = 0; $i < count($args); $i++) {
+    match ($args[$i]) {
+        '--host' => $host = $args[++$i] ?? fail('--host needs an address'),
+        '--start' => $start = $args[++$i] ?? fail('--start needs seconds'),
+        default => $words[] = $args[$i],
+    };
+}
+if ($host === '' && ($words[0] ?? '') !== 'serve') {
+    fail('no device to send to: set JPLAY_TARGET in .env or pass --host <ip>');
+}
+$target = $words[0] ?? fail('usage: jplay <link|file> | status | pause | resume | toggle | stop | serve');
+
+if ($target === 'serve') {
+    serve();
+    echo "streamer and token server running\n";
+    exit(0);
+}
+if (in_array($target, ['status', 'pause', 'resume', 'toggle', 'stop'], true)) {
+    echo json_encode(api($host, '/' . $target, $target === 'status' ? [] : ['go' => '1']), JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE), "\n";
+    exit(0);
+}
+
+$form = [];
+if (preg_match('#^(https?|smb)://#i', $target)) {
+    if (preg_match('#^https?://([^/]+\.)?(youtube\.com|youtu\.be|youtube-nocookie\.com)/#i', $target)) {
+        serve();
+    }
+    $form['url'] = $target;
+} else {
+    $path = realpath($target);
+    if ($path === false || !is_file($path) || !is_readable($path)) {
+        fail('no readable file at ' . $target);
+    }
+    $form['url'] = nasUri($path);
+    if ($form['url'] === null) {
+        // A NAS file is titled by the app's own catalogue; a served file has only its name.
+        $form['url'] = share($path, $host);
+        $form['title'] = pathinfo($path, PATHINFO_FILENAME);
+    }
+}
+if ($start !== null) {
+    $form['start'] = $start;
+}
+$reply = api($host, '/play', $form);
+if (isset($reply['error'])) {
+    fail($reply['error']);
+}
+echo 'Playing: ', $reply['playing'] ?? $form['url'], "\n";

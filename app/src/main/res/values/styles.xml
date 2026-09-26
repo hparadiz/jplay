@@ -1,0 +1,23 @@
+<resources>
+    <style name="AppTheme" parent="android:style/Theme.Material.NoActionBar">
+        <item name="android:fontFamily">sans</item>
+        <item name="android:colorAccent">#F38BCB</item>
+        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:statusBarColor">#110C18</item>
+        <item name="android:navigationBarColor">#110C18</item>
+        <item name="android:windowActionModeOverlay">true</item>
+        <item name="android:windowBackground">#110C18</item>
+        <item name="android:alertDialogTheme">@style/DialogTheme</item>
+    </style>
+    <!-- Menus and pickers in the library palette rather than the platform's grey. -->
+    <style name="DialogTheme" parent="android:style/Theme.Material.Dialog.Alert">
+        <item name="android:fontFamily">sans</item>
+        <item name="android:colorAccent">#F38BCB</item>
+        <item name="android:colorBackground">#211929</item>
+        <item name="android:windowBackground">@drawable/dialog_background</item>
+        <item name="android:textColorPrimary">#FAF2FF</item>
+        <item name="android:textColorSecondary">#B8A9C5</item>
+        <item name="android:textColorAlertDialogListItem">#FAF2FF</item>
+        <item name="android:colorControlNormal">#B8A9C5</item>
+    </style>
+</resources>

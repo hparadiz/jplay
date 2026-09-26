@@ -1,0 +1,12 @@
+.deps/
+.gradle/
+build/
+app/build/
+local.properties
+*.keystore
+*.jks
+*.idsig
+__pycache__/
+*.pyc
+.env
+media/raw/
